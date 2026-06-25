@@ -1,0 +1,3 @@
+[submodule "keys"]
+	path = keys
+	url = https://github.com/heruwaspodov/localstack-kms-keys.git

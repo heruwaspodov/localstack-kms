@@ -1,0 +1,17 @@
+services:
+  localstack:
+    container_name: localstack-kms
+    image: localstack/localstack:4.14.0
+
+    ports:
+      - "127.0.0.1:4566:4566"
+
+    environment:
+      SERVICES: kms
+      AWS_DEFAULT_REGION: ap-southeast-1
+      DEBUG: "1"
+      PERSISTENCE: "1"
+
+    volumes:
+      - "${HOME}/AnotherWorks/localstack-kms/volume:/var/lib/localstack"
+      - "${HOME}/AnotherWorks/localstack-kms/keys:/keys:ro"
