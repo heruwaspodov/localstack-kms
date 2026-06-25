@@ -1,25 +1,25 @@
 # LocalStack KMS
 
-Repository ini berisi setup LocalStack untuk kebutuhan development dan integration test KMS secara lokal. Fokus utamanya adalah menjalankan service KMS, memakai key material RSA dari folder `keys`, lalu mengimpor key tersebut ke LocalStack KMS untuk flow `SIGN_VERIFY`.
+This repository contains a LocalStack setup for local KMS development and integration testing. It runs the KMS service, uses RSA key material from the `keys` directory, and imports that key material into LocalStack KMS for the `SIGN_VERIFY` flow.
 
-Folder `keys` disimpan sebagai private Git submodule, sehingga isi private key dan certificate tidak ikut tampil di repository public.
+The `keys` directory is stored as a private Git submodule, so private keys and certificates are not exposed in the public repository.
 
-## Stack yang Dibutuhkan
+## Required Stack
 
 - Docker Desktop
 - Docker Compose
 - LocalStack `4.14.0`
 - Bash / zsh
-- Git dengan submodule support
-- Akses ke private repository submodule `localstack-kms-keys`
+- Git with submodule support
+- Access to the private `localstack-kms-keys` submodule repository
 
-Di dalam container LocalStack, script juga memakai:
+Inside the LocalStack container, the import script also uses:
 
 - `awslocal`
 - OpenSSL 3.x
 - Python 3
 
-## Struktur
+## Structure
 
 ```text
 localstack-kms/
@@ -27,58 +27,58 @@ localstack-kms/
 ├── import-rsa-key.sh
 ├── LOCALSTACK_KMS_IMPORTED_RSA_KEY.md
 ├── keys/                 # private submodule
-└── volume/               # state/cache LocalStack lokal
+└── volume/               # local LocalStack state/cache
 ```
 
 ## Clone
 
-Untuk mengambil repo beserta submodule private:
+Clone the repository together with its private submodule:
 
 ```bash
 git clone --recurse-submodules https://github.com/heruwaspodov/localstack-kms.git
 cd localstack-kms
 ```
 
-Jika sudah terlanjur clone tanpa submodule:
+If the repository was already cloned without submodules:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-Catatan: akses ke `keys` hanya berhasil jika akun GitHub punya permission ke private repo submodule.
+Note: the `keys` checkout only works if your GitHub account has access to the private submodule repository.
 
-## Menjalankan LocalStack
+## Run LocalStack
 
 ```bash
 docker compose up -d
 ```
 
-Endpoint LocalStack tersedia di:
+The LocalStack endpoint is available at:
 
 ```text
 http://127.0.0.1:4566
 ```
 
-Service yang diaktifkan hanya `kms`, dengan region default `ap-southeast-1`.
+Only the `kms` service is enabled, with `ap-southeast-1` as the default region.
 
 ## Import RSA Key
 
-Pastikan `.localstack-kms-key-id` sudah berisi KMS key ID yang akan menerima external key material, lalu jalankan:
+Make sure `.localstack-kms-key-id` contains the KMS key ID that will receive the external key material, then run:
 
 ```bash
 ./import-rsa-key.sh
 ```
 
-Script akan:
+The script will:
 
-- mengambil wrapping public key dan import token dari LocalStack KMS
-- mengubah private key ke PKCS#8 DER
-- membungkus key material dengan `RSA_AES_KEY_WRAP_SHA_256`
-- mengimpor key material ke LocalStack KMS
-- menampilkan state akhir KMS key
+- retrieve the wrapping public key and import token from LocalStack KMS
+- convert the private key to PKCS#8 DER
+- wrap the key material with `RSA_AES_KEY_WRAP_SHA_256`
+- import the key material into LocalStack KMS
+- print the final KMS key state
 
-Dokumentasi langkah lengkap ada di [LOCALSTACK_KMS_IMPORTED_RSA_KEY.md](LOCALSTACK_KMS_IMPORTED_RSA_KEY.md).
+The full step-by-step documentation is available in [LOCALSTACK_KMS_IMPORTED_RSA_KEY.md](LOCALSTACK_KMS_IMPORTED_RSA_KEY.md).
 
-## Catatan Keamanan
+## Security Notes
 
-Setup ini hanya untuk local development atau integration test. Jangan gunakan private key production sungguhan untuk eksperimen LocalStack.
+This setup is intended only for local development or integration testing. Do not use real production private keys for LocalStack experiments.
