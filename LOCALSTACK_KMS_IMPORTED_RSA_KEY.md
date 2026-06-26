@@ -1,48 +1,52 @@
-# LocalStack KMS — Import Existing RSA Private Key for Local Hash Signing
+# LocalStack KMS — Persistent Bootstrap for Imported RSA Signing Key
 
-Dokumentasi ini menjelaskan setup LocalStack KMS di macOS/Docker Desktop, mengimpor existing RSA private key, membuat alias KMS, dan membuktikan bahwa signature dari KMS dapat diverifikasi memakai certificate yang sudah ada.
+Dokumen ini menjelaskan setup LocalStack KMS pada macOS + Docker Desktop untuk local hash-signing test. Private key RSA yang sudah ada diimpor ke KMS sebagai asymmetric key `SIGN_VERIFY`, lalu selalu tersedia melalui alias stabil:
 
-> **Scope:** local development / integration test.  
+```text
+alias/msign-hash-signing
+```
+
+> **Scope:** local development dan integration testing.  
 > **Bukan:** pengganti AWS KMS, AWS CloudHSM, atau HSM production.
 
 ---
 
-## Hasil akhir
+## 1. Prinsip persistence yang dipakai
 
-Setelah seluruh langkah selesai, LocalStack memiliki KMS key berikut:
+Pada LocalStack Community `4.14.0`, jangan mengandalkan `PERSISTENCE=1` sebagai jaminan bahwa imported key akan tetap ada setelah container di-recreate.
 
-```text
-KeySpec:  RSA_2048
-KeyUsage: SIGN_VERIFY
-Origin:   EXTERNAL
-KeyState: Enabled
-Alias:    alias/msign-hash-signing
-```
-
-Alur yang tervalidasi:
+Setup ini memakai **persistent bootstrap**, bukan persistent physical KMS key:
 
 ```text
-private.pem
-  → diimport ke LocalStack KMS
-  → KMS Sign memakai SHA-256 + RSASSA_PKCS1_V1_5_SHA_256
-  → signature diverifikasi memakai public key dari signing.crt
-  → Signature Verified Successfully
+LocalStack boot
+  → READY-stage script berjalan
+  → cek alias alias/msign-hash-signing
+  → alias/key masih Enabled? selesai
+  → state hilang? buat EXTERNAL key baru
+  → import private.pem yang sama
+  → buat alias yang sama
 ```
+
+Konsekuensi:
+
+- Alias selalu stabil: `alias/msign-hash-signing`.
+- UUID Key ID dan ARN dapat berubah setelah recreate/state loss.
+- Aplikasi wajib memakai alias, bukan UUID/ARN.
+- Certificate tetap cocok selama `private.pem` yang diimpor adalah key yang sama.
 
 ---
 
-## 1. Prasyarat
+## 2. Prasyarat
 
 - macOS dengan Docker Desktop berjalan.
-- Terminal / zsh.
-- Folder berisi material key dan certificate:
-  - `private.pem`
-  - `signing.crt`
-  - optional chain: `root-ca.crt`, `sub-ca.crt`
-- OpenSSL tersedia pada host macOS.
-- Jangan gunakan private key production yang sebenarnya untuk eksperimen LocalStack.
+- Docker Compose.
+- LocalStack Community `4.14.0`.
+- Git submodule private yang menyediakan `keys/msign/private.pem`.
+- `private.pem` adalah RSA 2048, 3072, atau 4096 bit.
+- `signing.crt` adalah pasangan dari `private.pem`.
+- Jangan gunakan private key production untuk LocalStack experiment.
 
-Cek Docker:
+Cek tool:
 
 ```bash
 docker --version
@@ -51,187 +55,53 @@ docker compose version
 
 ---
 
-## 2. Struktur folder
-
-Buat project folder:
-
-```bash
-mkdir -p ~/AnotherWorks/localstack-kms/keys/msign
-mkdir -p ~/AnotherWorks/localstack-kms/volume
-cd ~/AnotherWorks/localstack-kms
-```
-
-Struktur yang diharapkan:
+## 3. Struktur repository
 
 ```text
 localstack-kms/
 ├── compose.yaml
-├── import-rsa-key.sh
-├── .gitignore
-├── .localstack-kms-key-id         # dibuat setelah CreateKey
-├── keys/                          # JANGAN commit
+├── import-rsa-key.sh                  # READY-stage idempotent bootstrap
+├── README.md
+├── LOCALSTACK_KMS_IMPORTED_RSA_KEY.md
+├── keys/                              # private Git submodule, never commit publicly
 │   └── msign/
 │       ├── private.pem
 │       ├── signing.crt
 │       ├── root-ca.crt
 │       └── sub-ca.crt
-└── volume/                        # state LocalStack, JANGAN commit
+└── volume/                            # local state/cache, never commit
 ```
 
-Salin key dan certificate ke folder `keys/msign/`.
-
----
-
-## 3. Lindungi key dari Git
-
-Buat `.gitignore`:
+Pastikan `.gitignore` memuat:
 
 ```gitignore
-# Sensitive key material and local LocalStack state
 keys/
 volume/
-.localstack-kms-key-id
 .env
+*.der
+*.p8
+*.key
 ```
 
-Jangan commit atau upload:
-
-- `private.pem`
-- file hasil konversi `.der`, `.p8`, atau `.key`
-- folder `volume/`, karena LocalStack dapat menyimpan state/key material impor di sana
-- output log yang memuat data sensitif
+Jika folder `keys` adalah Git submodule private, jangan tambahkan pola `keys/` ke `.gitignore` pada repository utama apabila hal itu mengganggu tracking submodule. Yang penting: private key tidak pernah disalin ke repository publik atau dikomit sebagai file biasa.
 
 ---
 
-## 4. Docker Compose untuk LocalStack KMS
+## 4. Verifikasi private key dan certificate
 
-> Gunakan tag **`4.14.0`**, bukan `latest`.  
-> Pada environment ini, image `latest` meminta `LOCALSTACK_AUTH_TOKEN` dan berhenti dengan exit code 55. Tag Community `4.14.0` dapat dipakai untuk local test tanpa auth token.
-
-Buat `compose.yaml`:
-
-```yaml
-services:
-  localstack:
-    container_name: localstack-kms
-    image: localstack/localstack:4.14.0
-
-    ports:
-      - "127.0.0.1:4566:4566"
-
-    environment:
-      SERVICES: kms
-      AWS_DEFAULT_REGION: ap-southeast-1
-      DEBUG: "1"
-      PERSISTENCE: "1"
-
-    volumes:
-      # Ganti path host berikut sesuai lokasi folder project di Mac.
-      - "${HOME}/AnotherWorks/localstack-kms/volume:/var/lib/localstack"
-      - "${HOME}/AnotherWorks/localstack-kms/keys:/keys:ro"
-```
-
-Catatan:
-
-- Port `4566` adalah endpoint AWS API LocalStack.
-- `:ro` membuat folder key hanya bisa dibaca dari container.
-- Untuk repository yang lokasinya berbeda, ganti `/AnotherWorks/localstack-kms` sesuai path lokal masing-masing developer.
-- `PERSISTENCE=1` membuat state LocalStack bertahan di folder `volume/`.
-
----
-
-## 5. Jalankan LocalStack
-
-```bash
-cd ~/AnotherWorks/localstack-kms
-
-docker compose down
-docker compose up -d
-docker compose logs -f localstack
-```
-
-Tanda startup berhasil:
-
-```text
-Ready.
-```
-
-Keluar dari stream log dengan `Ctrl + C`. Ini hanya menghentikan tampilan log, bukan containernya.
-
-Cek status:
-
-```bash
-docker compose ps
-```
-
-Cek health endpoint:
-
-```bash
-curl -s http://localhost:4566/_localstack/health
-```
-
-Expected minimal:
-
-```json
-{
-  "services": {
-    "kms": "running"
-  },
-  "edition": "community",
-  "version": "4.14.0"
-}
-```
-
-> Membuka `http://localhost:4566` dari browser dapat terlihat kosong/putih. Itu normal karena endpoint tersebut adalah AWS API endpoint, bukan dashboard UI. Gunakan `/_localstack/health` untuk health check.
-
----
-
-## 6. Pastikan file key sudah di-mount ke container
-
-```bash
-docker compose exec localstack sh -lc 'ls -lah /keys && ls -lah /keys/msign'
-```
-
-Expected contoh output:
-
-```text
-/keys/msign/private.pem
-/keys/msign/signing.crt
-/keys/msign/root-ca.crt
-/keys/msign/sub-ca.crt
-```
-
-Jika `/keys/msign` tidak ditemukan, cek mount:
-
-```bash
-docker inspect localstack-kms \
-  --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
-```
-
-Pastikan ada mapping host folder `keys` ke `/keys`, lalu recreate:
-
-```bash
-docker compose down
-docker compose up -d --force-recreate
-```
-
----
-
-## 7. Verifikasi private key dan certificate adalah pasangan yang sama
-
-### 7.1 Cek tipe dan ukuran private key
+### 4.1 Cek RSA key size
 
 ```bash
 openssl pkey -in keys/msign/private.pem -noout -text | head -n 1
 ```
 
-Target untuk contoh ini:
+Contoh:
 
 ```text
 RSA Private-Key: (2048 bit)
 ```
 
-### 7.2 Bandingkan public key hash
+### 4.2 Verifikasi certificate adalah pasangan key yang sama
 
 ```bash
 echo "Private key public-key hash:"
@@ -243,182 +113,138 @@ openssl x509 -in keys/msign/signing.crt -pubkey -noout \
   | shasum -a 256
 ```
 
-Kedua SHA-256 hash **harus identik**.
-
-Jika hash berbeda, hentikan proses. `private.pem` dan `signing.crt` bukan key pair yang sama.
+Dua hash SHA-256 harus identik. Jika berbeda, hentikan proses: key dan certificate bukan pasangan yang sama.
 
 ---
 
-## 8. Buat KMS key kosong dengan origin EXTERNAL
+## 5. Docker Compose
 
-Untuk RSA private key 2048-bit:
+Gunakan `localstack/localstack:4.14.0`, bukan `latest`.
+
+> Pada setup ini, image `latest` meminta auth token dan tidak dipakai untuk local Community test.
+
+`compose.yaml`:
+
+```yaml
+services:
+  localstack:
+    container_name: localstack-kms
+    image: localstack/localstack:4.14.0
+
+    ports:
+      # Terbuka hanya pada Mac host.
+      - "127.0.0.1:4566:4566"
+
+    environment:
+      SERVICES: kms
+      AWS_DEFAULT_REGION: ap-southeast-1
+      DEBUG: "1"
+
+    volumes:
+      # Private material hanya bisa dibaca dari container.
+      - "./keys:/keys:ro"
+
+      # Script ini otomatis dieksekusi LocalStack ketika READY.
+      - "./import-rsa-key.sh:/etc/localstack/init/ready.d/01-bootstrap-kms.sh:ro"
+
+      # Optional local state/cache. Bootstrap tetap wajib ada.
+      - "./volume:/var/lib/localstack"
+```
+
+Pastikan script dapat dieksekusi:
 
 ```bash
-KEY_ID=$(
-  docker compose exec -T localstack awslocal kms create-key \
-    --origin EXTERNAL \
-    --key-usage SIGN_VERIFY \
-    --key-spec RSA_2048 \
-    --description "Local test imported RSA signing key" \
-    --query 'KeyMetadata.KeyId' \
-    --output text
-)
-
-echo "$KEY_ID" | tee .localstack-kms-key-id
-
-docker compose exec -T localstack awslocal kms describe-key \
-  --key-id "$KEY_ID" \
-  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,Origin:Origin,KeyUsage:KeyUsage,KeySpec:KeySpec}' \
-  --output table
-```
-
-Expected status sebelum import:
-
-```text
-KeyState: PendingImport
-Origin:   EXTERNAL
-KeyUsage: SIGN_VERIFY
-KeySpec:  RSA_2048
-```
-
----
-
-## 9. Ambil parameter import (optional verification)
-
-```bash
-KEY_ID="$(cat .localstack-kms-key-id)"
-
-docker compose exec -T localstack \
-  awslocal kms get-parameters-for-import \
-  --key-id "$KEY_ID" \
-  --wrapping-algorithm RSA_AES_KEY_WRAP_SHA_256 \
-  --wrapping-key-spec RSA_4096 \
-  --query '{KeyId:KeyId,ParametersValidTo:ParametersValidTo}' \
-  --output table
-```
-
-Import RSA private key menggunakan hybrid wrapping:
-
-```text
-private.pem
-  → PKCS#8 DER
-  → AES-256 Key Wrap with Padding
-  → AES key dienkripsi RSA-OAEP SHA-256 memakai wrapping public key
-  → ImportKeyMaterial
-```
-
----
-
-## 10. Import RSA private key ke LocalStack KMS
-
-Buat `import-rsa-key.sh`:
-
-```bash
-cat > import-rsa-key.sh <<'BASH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-KEY_ID="$(tr -d '\r\n' < .localstack-kms-key-id)"
-
-docker compose exec -T localstack sh -s "$KEY_ID" <<'SH'
-set -eu
-
-KEY_ID="$1"
-WORKDIR="$(mktemp -d /tmp/kms-import.XXXXXX)"
-
-cleanup() {
-  rm -rf "$WORKDIR"
-}
-trap cleanup EXIT HUP INT TERM
-
-echo "==> OpenSSL version"
-openssl version
-
-openssl version | grep -Eq '^OpenSSL 3\.' || {
-  echo "ERROR: OpenSSL 3.x diperlukan untuk AES key wrap."
-  exit 2
-}
-
-echo "==> Download wrapping public key + import token"
-awslocal kms get-parameters-for-import \
-  --key-id "$KEY_ID" \
-  --wrapping-algorithm RSA_AES_KEY_WRAP_SHA_256 \
-  --wrapping-key-spec RSA_4096 \
-  --output json > "$WORKDIR/params.json"
-
-python3 - "$WORKDIR/params.json" "$WORKDIR" <<'PY'
-import base64
-import json
-import sys
-
-params_path, workdir = sys.argv[1], sys.argv[2]
-
-with open(params_path) as f:
-    data = json.load(f)
-
-with open(f"{workdir}/WrappingPublicKey.der", "wb") as f:
-    f.write(base64.b64decode(data["PublicKey"]))
-
-with open(f"{workdir}/ImportToken.bin", "wb") as f:
-    f.write(base64.b64decode(data["ImportToken"]))
-PY
-
-echo "==> Convert private key to PKCS#8 DER"
-openssl pkcs8 \
-  -topk8 \
-  -nocrypt \
-  -in /keys/msign/private.pem \
-  -outform DER \
-  -out "$WORKDIR/PlaintextKeyMaterial.der"
-
-echo "==> Generate temporary AES-256 wrapping key"
-openssl rand -out "$WORKDIR/aes-key.bin" 32
-
-echo "==> Wrap private key using AES Key Wrap with Padding"
-openssl enc -id-aes256-wrap-pad \
-  -K "$(python3 -c 'import sys; print(open(sys.argv[1], "rb").read().hex())' "$WORKDIR/aes-key.bin")" \
-  -iv A65959A6 \
-  -in "$WORKDIR/PlaintextKeyMaterial.der" \
-  -out "$WORKDIR/key-material-wrapped.bin"
-
-echo "==> Encrypt AES key using RSA-OAEP SHA-256"
-openssl pkeyutl \
-  -encrypt \
-  -in "$WORKDIR/aes-key.bin" \
-  -out "$WORKDIR/aes-key-wrapped.bin" \
-  -inkey "$WORKDIR/WrappingPublicKey.der" \
-  -keyform DER \
-  -pubin \
-  -pkeyopt rsa_padding_mode:oaep \
-  -pkeyopt rsa_oaep_md:sha256 \
-  -pkeyopt rsa_mgf1_md:sha256
-
-cat \
-  "$WORKDIR/aes-key-wrapped.bin" \
-  "$WORKDIR/key-material-wrapped.bin" \
-  > "$WORKDIR/EncryptedKeyMaterial.bin"
-
-echo "==> Import key material into LocalStack KMS"
-awslocal kms import-key-material \
-  --key-id "$KEY_ID" \
-  --encrypted-key-material "fileb://$WORKDIR/EncryptedKeyMaterial.bin" \
-  --import-token "fileb://$WORKDIR/ImportToken.bin" \
-  --expiration-model KEY_MATERIAL_DOES_NOT_EXPIRE
-
-echo
-echo "==> Final KMS key state"
-awslocal kms describe-key \
-  --key-id "$KEY_ID" \
-  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,Origin:Origin,KeyUsage:KeyUsage,KeySpec:KeySpec}' \
-  --output table
-SH
-BASH
-
 chmod +x import-rsa-key.sh
-./import-rsa-key.sh
+git update-index --chmod=+x import-rsa-key.sh
 ```
 
-Expected final state:
+> Bila Docker Desktop gagal mem-mount path relatif pada mesin tertentu, ganti sumber volume dengan absolute path ke checkout repository. Contoh:
+>
+> ```yaml
+> - "${HOME}/AnotherWorks/localstack-kms/keys:/keys:ro"
+> - "${HOME}/AnotherWorks/localstack-kms/import-rsa-key.sh:/etc/localstack/init/ready.d/01-bootstrap-kms.sh:ro"
+> ```
+
+---
+
+## 6. Cara kerja `import-rsa-key.sh`
+
+File `import-rsa-key.sh` sekarang adalah bootstrap script yang dieksekusi LocalStack dari folder `ready.d`.
+
+Script melakukan hal berikut:
+
+1. Memeriksa apakah alias `alias/msign-hash-signing` sudah menunjuk ke key dengan state `Enabled`.
+2. Jika sudah ada, exit tanpa mengubah key.
+3. Jika belum ada:
+   - menentukan `RSA_2048`, `RSA_3072`, atau `RSA_4096` berdasarkan private key;
+   - membuat KMS key dengan `Origin=EXTERNAL` dan `KeyUsage=SIGN_VERIFY`;
+   - memanggil `GetParametersForImport` dengan `RSA_AES_KEY_WRAP_SHA_256`;
+   - mengonversi private key menjadi PKCS#8 DER;
+   - membungkus material dengan AES Key Wrap with Padding;
+   - mengenkripsi AES wrapping key dengan RSA-OAEP SHA-256;
+   - menjalankan `ImportKeyMaterial`;
+   - membuat alias stabil `alias/msign-hash-signing`.
+
+Private key plaintext hasil konversi hanya dibuat sementara di `/tmp/kms-bootstrap.*` dan dibersihkan saat script selesai.
+
+---
+
+## 7. Start LocalStack
+
+```bash
+docker compose down
+docker compose up -d
+docker compose logs -f localstack
+```
+
+Target log:
+
+```text
+[kms-bootstrap] Bootstrap complete
+```
+
+Keluar dari stream log dengan `Ctrl + C`; ini tidak menghentikan container.
+
+Cek container:
+
+```bash
+docker compose ps
+```
+
+Cek health endpoint dari Mac:
+
+```bash
+curl -s http://localhost:4566/_localstack/health
+```
+
+Expected minimum:
+
+```json
+{
+  "services": {
+    "kms": "running"
+  },
+  "edition": "community",
+  "version": "4.14.0"
+}
+```
+
+`http://localhost:4566` dapat terlihat putih bila dibuka langsung di browser. Itu normal: endpoint tersebut adalah AWS API endpoint, bukan dashboard web.
+
+---
+
+## 8. Verifikasi KMS alias dan key
+
+```bash
+docker compose exec -T localstack \
+  awslocal kms describe-key \
+  --region ap-southeast-1 \
+  --key-id alias/msign-hash-signing \
+  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,Origin:Origin,KeyUsage:KeyUsage,KeySpec:KeySpec}' \
+  --output table
+```
+
+Expected:
 
 ```text
 KeyState: Enabled
@@ -427,66 +253,33 @@ KeyUsage: SIGN_VERIFY
 KeySpec:  RSA_2048
 ```
 
-### Catatan troubleshooting: `xxd: not found`
-
-Jangan gunakan:
+Lihat alias:
 
 ```bash
-xxd -p < "$WORKDIR/aes-key.bin"
-```
-
-Image LocalStack ini tidak menyediakan `xxd`. Script di atas memakai Python untuk mengubah AES key menjadi hex:
-
-```bash
-python3 -c 'import sys; print(open(sys.argv[1], "rb").read().hex())'
-```
-
-Jika `xxd` gagal, OpenSSL dapat menggunakan AES key yang salah dan `ImportKeyMaterial` akan gagal.
-
----
-
-## 11. Buat alias KMS
-
-Alias menghindari hardcode UUID KeyId di aplikasi:
-
-```bash
-KEY_ID="$(cat .localstack-kms-key-id)"
-
-docker compose exec -T localstack awslocal kms create-alias \
-  --alias-name alias/msign-hash-signing \
-  --target-key-id "$KEY_ID"
-
-docker compose exec -T localstack awslocal kms describe-key \
-  --key-id alias/msign-hash-signing \
-  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,KeySpec:KeySpec,KeyUsage:KeyUsage}' \
+docker compose exec -T localstack \
+  awslocal kms list-aliases \
+  --region ap-southeast-1 \
   --output table
 ```
 
-Gunakan di aplikasi:
+Aplikasi selalu menggunakan:
 
 ```text
 alias/msign-hash-signing
 ```
 
+Jangan hardcode `KeyId` UUID atau ARN.
+
 ---
 
-## 12. Smoke test: sign dari KMS dan verify memakai signing certificate
+## 9. Smoke test: KMS sign dan certificate verify
 
-Command ini:
-
-1. Membuat message dummy.
-2. Membuat SHA-256 digest.
-3. Meminta LocalStack KMS melakukan signing.
-4. Mengambil public key dari `signing.crt`.
-5. Memverifikasi signature.
+Command ini membuat SHA-256 digest, meminta KMS sign dengan `RSASSA_PKCS1_V1_5_SHA_256`, lalu memverifikasi signature memakai public key dari `signing.crt`.
 
 ```bash
-KEY_ID="$(cat .localstack-kms-key-id)"
-
-docker compose exec -T localstack sh -s "$KEY_ID" <<'SH'
+docker compose exec -T localstack sh <<'SH'
 set -eu
 
-KEY_ID="$1"
 WORKDIR="$(mktemp -d /tmp/kms-sign-test.XXXXXX)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -497,7 +290,8 @@ openssl dgst -sha256 -binary \
   > "$WORKDIR/digest.bin"
 
 awslocal kms sign \
-  --key-id "$KEY_ID" \
+  --region ap-southeast-1 \
+  --key-id alias/msign-hash-signing \
   --message "fileb://$WORKDIR/digest.bin" \
   --message-type DIGEST \
   --signing-algorithm RSASSA_PKCS1_V1_5_SHA_256 \
@@ -523,103 +317,163 @@ openssl pkeyutl -verify \
 SH
 ```
 
-Expected output:
+Expected:
 
 ```text
 Signature Verified Successfully
 ```
 
-Jika output tersebut muncul, KMS key yang diimport dan `signing.crt` terbukti cocok secara kriptografis.
+Hasil ini membuktikan key yang diimport ke LocalStack KMS cocok secara kriptografis dengan `signing.crt`.
 
 ---
 
-## 13. Environment untuk hash-signing service
+## 10. Integrasi hash-signing-service
 
-### Service berjalan langsung di Mac
+### Service berjalan di Mac host
 
 ```env
-AWS_REGION=ap-southeast-1
-AWS_KMS_KEY_ID=alias/msign-hash-signing
+SIGNER_BACKEND=awskms
+AWS_KMS_REGION=ap-southeast-1
 AWS_ENDPOINT_URL=http://localhost:4566
+AWS_KMS_KEY_ID=alias/msign-hash-signing
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 ```
 
-### Service berjalan sebagai container di Docker Compose yang sama
+### Service berjalan di OrbStack Linux VM
+
+Dari OrbStack VM, `localhost` menunjuk VM, bukan macOS host. Gunakan:
 
 ```env
-AWS_REGION=ap-southeast-1
+SIGNER_BACKEND=awskms
+AWS_KMS_REGION=ap-southeast-1
+AWS_ENDPOINT_URL=http://host.orb.internal:4566
 AWS_KMS_KEY_ID=alias/msign-hash-signing
-AWS_ENDPOINT_URL=http://localstack:4566
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 ```
 
-Perbedaan endpoint:
+Cek dari VM:
 
-```text
-Host macOS                  → http://localhost:4566
-Container satu Compose net  → http://localstack:4566
+```bash
+curl http://host.orb.internal:4566/_localstack/health
 ```
 
-Aplikasi perlu menggunakan:
-
-```text
-MessageType:       DIGEST
-SigningAlgorithm:  RSASSA_PKCS1_V1_5_SHA_256
-```
-
-sesuai alur hash-signing / PDF signing yang diuji.
+Jika hasil health menunjukkan `kms: running`, jalur VM → macOS host → Docker Desktop → LocalStack sudah benar.
 
 ---
 
-## 14. Troubleshooting ringkas
+## 11. Validasi persistent bootstrap
 
-### Container berhenti dengan exit code 55 / License activation failed
+Jalankan recreate test:
 
-Penyebab umum: memakai `localstack/localstack:latest`, yang meminta `LOCALSTACK_AUTH_TOKEN`.
+```bash
+docker compose down
+docker compose up -d
 
-Solusi local test ini:
+docker compose exec -T localstack \
+  awslocal kms describe-key \
+  --region ap-southeast-1 \
+  --key-id alias/msign-hash-signing \
+  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,Origin:Origin,KeyUsage:KeyUsage,KeySpec:KeySpec}' \
+  --output table
+```
+
+Validasi yang wajib lulus:
+
+```text
+alias/msign-hash-signing
+  → KeyState: Enabled
+  → Origin: EXTERNAL
+  → KeyUsage: SIGN_VERIFY
+```
+
+`KeyId` boleh berubah setelah recreate. Itu normal karena bootstrap dapat membuat resource KMS baru. Alias harus tetap sama.
+
+Untuk manual reconcile saat LocalStack sudah hidup:
+
+```bash
+docker compose exec -T localstack \
+  /etc/localstack/init/ready.d/01-bootstrap-kms.sh
+```
+
+Jika alias sudah ada dan `Enabled`, command menjadi no-op yang aman.
+
+---
+
+## 12. Troubleshooting
+
+### `License activation failed` / exit code 55
+
+Penyebab umum: memakai `localstack/localstack:latest`.
+
+Gunakan:
 
 ```yaml
 image: localstack/localstack:4.14.0
 ```
 
-Kemudian:
+### Alias atau key tidak ditemukan setelah restart/recreate
+
+Pastikan mount bootstrap ada di `compose.yaml`:
+
+```yaml
+- "./import-rsa-key.sh:/etc/localstack/init/ready.d/01-bootstrap-kms.sh:ro"
+```
+
+Cek executable bit:
+
+```bash
+chmod +x import-rsa-key.sh
+ls -l import-rsa-key.sh
+```
+
+Lalu:
 
 ```bash
 docker compose down
-docker compose pull
-docker compose up -d --force-recreate
-```
-
-### `No such container: localstack-kms`
-
-Container belum dibuat/berjalan, atau sebelumnya sudah `docker compose down`.
-
-```bash
 docker compose up -d
-docker compose ps
+docker compose logs --tail=200 localstack
 ```
 
-### `/keys/msign` tidak ada
+Cari log:
 
-Periksa mount dan pastikan path host dalam `compose.yaml` benar:
+```text
+[kms-bootstrap] Bootstrap complete
+```
+
+### `/keys/msign` tidak ditemukan
+
+Cek mount:
 
 ```bash
 docker inspect localstack-kms \
   --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 ```
 
-Kemudian recreate container.
+Pastikan host `keys` dipetakan ke `/keys`.
 
 ### `ImportKeyMaterial` menghasilkan `InternalError`
 
-Periksa bahwa script tidak menggunakan `xxd` yang tidak tersedia di image. Gunakan versi script pada dokumentasi ini yang mengonversi AES key ke hex melalui Python.
+Pastikan bootstrap memakai Python untuk membuat AES key hex. Jangan gunakan `xxd`, karena image LocalStack ini tidak menyediakannya.
 
-### Browser membuka `http://localhost:4566` tetapi putih/kosong
+```sh
+python3 -c 'import sys; print(open(sys.argv[1], "rb").read().hex())'
+```
 
-Normal. Itu endpoint AWS API. Gunakan:
+### VM tidak dapat akses `localhost:4566`
+
+Dari OrbStack VM, gunakan:
+
+```text
+http://host.orb.internal:4566
+```
+
+Bukan `http://localhost:4566`.
+
+### Browser membuka `http://localhost:4566` tetapi blank
+
+Normal. Gunakan health endpoint:
 
 ```bash
 curl -s http://localhost:4566/_localstack/health
@@ -627,50 +481,42 @@ curl -s http://localhost:4566/_localstack/health
 
 ---
 
-## 15. Reset environment lokal
+## 13. Reset local environment
 
-> Perintah berikut menghapus state LocalStack lokal, termasuk imported key yang tersimpan di `volume/`.
+> Ini hanya untuk test environment. Perintah berikut menghapus LocalStack container dan local state/cache.
 
 ```bash
 docker compose down
 rm -rf volume/*
-rm -f .localstack-kms-key-id
+docker compose up -d
 ```
 
-Setelah reset, ulangi dari langkah **8** untuk membuat dan mengimpor KMS key baru.
+Bootstrap akan mengimpor key lagi dan membuat alias yang sama.
 
 ---
 
-## 16. Security dan batasan penting
+## 14. Security and limits
 
-1. **LocalStack bukan HSM dan bukan AWS KMS production.**  
-   Ia hanya dipakai untuk pengembangan serta verifikasi integrasi API.
-
-2. **Imported private key dapat tersimpan pada folder `volume/`.**  
-   Lindungi folder tersebut seperti private key biasa, jangan commit atau share.
-
-3. **Jangan gunakan private key production/GlobalSign/CloudHSM production di LocalStack.**  
-   Gunakan key staging atau test-only.
-
-4. **Keberhasilan LocalStack tidak membuktikan kesetaraan penuh dengan AWS KMS.**  
-   Validasi akhir tetap perlu dilakukan pada AWS KMS asli, termasuk permission IAM, region, import flow, signing API, dan output yang dipakai oleh PDF/CMS pipeline.
-
-5. **Keberhasilan `Signature Verified Successfully` hanya membuktikan kecocokan kriptografis key dan certificate.**  
-   Validitas trust Adobe / AATL / LTV / certificate chain merupakan concern terpisah yang harus diuji di pipeline PDF lengkap.
+1. LocalStack bukan secure key store production.
+2. Private key test/staging tetap sensitif dan tidak boleh dikomit atau dibagikan.
+3. `keys` sebaiknya tetap berada pada private submodule atau secret storage lokal.
+4. Bootstrap mengembalikan fungsi signing yang sama, tetapi tidak memberi HSM-backed non-exportability atau certification/compliance AWS KMS/CloudHSM.
+5. `Signature Verified Successfully` hanya membuktikan kecocokan cryptographic key/certificate. Trust Adobe, AATL, LTV, timestamp, certificate chain, dan compliance harus diuji terpisah pada pipeline PDF lengkap.
 
 ---
 
-## Checklist akhir
+## 15. Checklist
 
 ```text
 [ ] Docker Desktop running
-[ ] LocalStack KMS health = running
-[ ] /keys/msign/private.pem terlihat di container
-[ ] private.pem dan signing.crt punya public-key hash yang sama
-[ ] KMS key: RSA_2048 + SIGN_VERIFY + EXTERNAL
-[ ] KMS key state = Enabled
-[ ] Alias alias/msign-hash-signing tersedia
-[ ] KMS Sign menghasilkan signature
-[ ] Signature Verified Successfully terhadap signing.crt
-[ ] keys/, volume/, .localstack-kms-key-id tidak masuk Git
+[ ] LocalStack health menunjukkan kms: running
+[ ] /keys/msign/private.pem dapat dibaca LocalStack
+[ ] private.pem dan signing.crt memiliki public-key hash yang sama
+[ ] bootstrap script mounted ke ready.d
+[ ] alias/msign-hash-signing resolve ke key Enabled
+[ ] key Origin = EXTERNAL dan KeyUsage = SIGN_VERIFY
+[ ] KMS Sign lolos "Signature Verified Successfully"
+[ ] hash-signing-service memakai alias, bukan UUID/ARN
+[ ] OrbStack VM memakai host.orb.internal:4566
+[ ] keys/ dan volume/ tidak masuk repository publik
 ```

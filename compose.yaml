@@ -15,3 +15,4 @@ services:
     volumes:
       - "${HOME}/AnotherWorks/localstack-kms/volume:/var/lib/localstack"
       - "${HOME}/AnotherWorks/localstack-kms/keys:/keys:ro"
+      - "${HOME}/AnotherWorks/localstack-kms/init:/etc/localstack/init/ready.d:ro"

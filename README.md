@@ -1,84 +1,211 @@
 # LocalStack KMS
 
-This repository contains a LocalStack setup for local KMS development and integration testing. It runs the KMS service, uses RSA key material from the `keys` directory, and imports that key material into LocalStack KMS for the `SIGN_VERIFY` flow.
+LocalStack KMS setup untuk local development dan integration test hash-signing. Repository ini mengimpor RSA private key dari private `keys` submodule ke LocalStack KMS dengan konfigurasi:
 
-The `keys` directory is stored as a private Git submodule, so private keys and certificates are not exposed in the public repository.
+```text
+KeyUsage: SIGN_VERIFY
+Origin:   EXTERNAL
+Alias:    alias/msign-hash-signing
+```
 
-## Required Stack
+> Ini hanya untuk local development / integration testing. LocalStack bukan AWS KMS, CloudHSM, atau HSM production.
+
+## Persistent bootstrap, bukan persistent UUID
+
+LocalStack Community `4.14.0` tidak boleh diasumsikan menyimpan imported KMS key secara andal setelah container dibuat ulang. Karena itu repository ini memakai **persistent bootstrap**:
+
+1. Saat LocalStack mencapai stage `READY`, `import-rsa-key.sh` otomatis dijalankan.
+2. Script mengecek alias `alias/msign-hash-signing`.
+3. Bila alias sudah menunjuk ke key `Enabled`, script tidak melakukan apa pun.
+4. Bila state key/alias hilang, script membuat key `EXTERNAL`, mengimpor `private.pem`, lalu membuat alias yang sama.
+
+Dengan pendekatan ini, aplikasi selalu memakai alias stabil:
+
+```text
+alias/msign-hash-signing
+```
+
+UUID/ARN KMS dapat berubah setelah container recreate atau state LocalStack hilang. Jangan hardcode UUID/ARN di aplikasi.
+
+## Requirements
 
 - Docker Desktop
 - Docker Compose
 - LocalStack `4.14.0`
 - Bash / zsh
-- Git with submodule support
-- Access to the private `localstack-kms-keys` submodule repository
+- Git dengan submodule support
+- Akses ke private submodule `localstack-kms-keys`
 
-Inside the LocalStack container, the import script also uses:
+Container LocalStack sudah menyediakan:
 
 - `awslocal`
 - OpenSSL 3.x
 - Python 3
 
-## Structure
+## Repository structure
 
 ```text
 localstack-kms/
 ├── compose.yaml
-├── import-rsa-key.sh
-├── LOCALSTACK_KMS_IMPORTED_RSA_KEY.md
-├── keys/                 # private submodule
-└── volume/               # local LocalStack state/cache
+├── import-rsa-key.sh                  # READY-stage persistent bootstrap
+├── LOCALSTACK_KMS_IMPORTED_RSA_KEY.md # detailed guide
+├── keys/                              # private Git submodule; never public
+│   └── msign/
+│       ├── private.pem
+│       ├── signing.crt
+│       ├── root-ca.crt
+│       └── sub-ca.crt
+└── volume/                            # local cache/state; never commit
 ```
 
 ## Clone
-
-Clone the repository together with its private submodule:
 
 ```bash
 git clone --recurse-submodules https://github.com/heruwaspodov/localstack-kms.git
 cd localstack-kms
 ```
 
-If the repository was already cloned without submodules:
+For an existing checkout:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-Note: the `keys` checkout only works if your GitHub account has access to the private submodule repository.
+The `keys` directory is a private submodule. GitHub access to that private repository is required.
 
-## Run LocalStack
+## Docker Compose requirement
+
+`compose.yaml` must mount both the private key directory and the bootstrap script:
+
+```yaml
+services:
+  localstack:
+    container_name: localstack-kms
+    image: localstack/localstack:4.14.0
+
+    ports:
+      - "127.0.0.1:4566:4566"
+
+    environment:
+      SERVICES: kms
+      AWS_DEFAULT_REGION: ap-southeast-1
+      DEBUG: "1"
+
+    volumes:
+      - "./keys:/keys:ro"
+      - "./import-rsa-key.sh:/etc/localstack/init/ready.d/01-bootstrap-kms.sh:ro"
+      - "./volume:/var/lib/localstack"
+```
+
+Make the script executable and commit its executable bit:
+
+```bash
+chmod +x import-rsa-key.sh
+git update-index --chmod=+x import-rsa-key.sh
+```
+
+## Start LocalStack
 
 ```bash
 docker compose up -d
+docker compose logs -f localstack
 ```
 
-The LocalStack endpoint is available at:
+Expected log after LocalStack is ready:
 
 ```text
-http://127.0.0.1:4566
+[kms-bootstrap] Bootstrap complete
 ```
 
-Only the `kms` service is enabled, with `ap-southeast-1` as the default region.
-
-## Import RSA Key
-
-Make sure `.localstack-kms-key-id` contains the KMS key ID that will receive the external key material, then run:
+Check health:
 
 ```bash
-./import-rsa-key.sh
+curl -s http://localhost:4566/_localstack/health
 ```
 
-The script will:
+Check the stable alias:
 
-- retrieve the wrapping public key and import token from LocalStack KMS
-- convert the private key to PKCS#8 DER
-- wrap the key material with `RSA_AES_KEY_WRAP_SHA_256`
-- import the key material into LocalStack KMS
-- print the final KMS key state
+```bash
+docker compose exec -T localstack \
+  awslocal kms describe-key \
+  --region ap-southeast-1 \
+  --key-id alias/msign-hash-signing \
+  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,Origin:Origin,KeyUsage:KeyUsage,KeySpec:KeySpec}' \
+  --output table
+```
 
-The full step-by-step documentation is available in [LOCALSTACK_KMS_IMPORTED_RSA_KEY.md](LOCALSTACK_KMS_IMPORTED_RSA_KEY.md).
+Expected:
 
-## Security Notes
+```text
+KeyState: Enabled
+Origin:   EXTERNAL
+KeyUsage: SIGN_VERIFY
+KeySpec:  RSA_2048
+```
 
-This setup is intended only for local development or integration testing. Do not use real production private keys for LocalStack experiments.
+## Service configuration
+
+### hash-signing-service runs on the Mac host
+
+```env
+SIGNER_BACKEND=awskms
+AWS_KMS_REGION=ap-southeast-1
+AWS_ENDPOINT_URL=http://localhost:4566
+AWS_KMS_KEY_ID=alias/msign-hash-signing
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+```
+
+### hash-signing-service runs in an OrbStack Linux VM
+
+```env
+SIGNER_BACKEND=awskms
+AWS_KMS_REGION=ap-southeast-1
+AWS_ENDPOINT_URL=http://host.orb.internal:4566
+AWS_KMS_KEY_ID=alias/msign-hash-signing
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+```
+
+From an OrbStack VM, `localhost` points to the VM itself. Use `host.orb.internal` to reach Docker Desktop running on macOS.
+
+## Reconcile manually
+
+The bootstrap runs automatically at every LocalStack start. To run it manually while LocalStack is already alive:
+
+```bash
+docker compose exec -T localstack \
+  /etc/localstack/init/ready.d/01-bootstrap-kms.sh
+```
+
+If alias/key already exists and is `Enabled`, the command is a safe no-op.
+
+## Verify after restart or recreate
+
+```bash
+docker compose down
+docker compose up -d
+
+docker compose exec -T localstack \
+  awslocal kms describe-key \
+  --region ap-southeast-1 \
+  --key-id alias/msign-hash-signing \
+  --query 'KeyMetadata.{KeyId:KeyId,KeyState:KeyState,Origin:Origin}' \
+  --output table
+```
+
+The `KeyId` may change after a recreate. The required invariant is:
+
+```text
+alias/msign-hash-signing → Enabled RSA SIGN_VERIFY key
+```
+
+## Security
+
+- Never commit `keys/`, `volume/`, private key conversions, or environment secrets.
+- Use staging/test key material only.
+- The bootstrap temporarily converts the private key to PKCS#8 DER inside `/tmp` and removes temporary files on exit.
+- The `keys` mount is read-only, but the imported material can still exist in LocalStack runtime/state. Treat the entire local environment as sensitive.
+- Passing the LocalStack test proves integration behavior only; it does not prove Adobe trust, AATL, LTV, legal/compliance validity, or equivalence with AWS KMS/HSM production.
+
+For the full import algorithm, smoke test, troubleshooting, and reset procedure, read [LOCALSTACK_KMS_IMPORTED_RSA_KEY.md](LOCALSTACK_KMS_IMPORTED_RSA_KEY.md).
